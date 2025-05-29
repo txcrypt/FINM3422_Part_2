@@ -1,93 +1,89 @@
+# option_models/barrier_option.py
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from option_models.option import Option
+
+from option_models.option import Option          # <--  S0, K, T, q, r, sigma
 from utilities.monte_carlo import simulate_paths
 
 class BarrierOption(Option):
     """
-    Represents a European up-and-in barrier call option, valued using Monte Carlo.
-    Inherits common behavior from the Option base class.
+    European up-and-in barrier *call* (easy to flip to put if desired).
+    Valued by Monte-Carlo; includes Delta & Vega via finite-difference;
+    basic path & payoff visualisers.
     """
 
     DEFAULT_PATHS = 500_000
     DEFAULT_STEPS = 252
 
-    def __init__(self, S0, K, T, r, sigma, B, valuation_date=None):
+    # ---------- constructor -------------------------------------------------
+    def __init__(
+        self,
+        S0: float,
+        K: float,
+        T: float,
+        r: float,
+        sigma: float,
+        B: float,
+        q: float = 0.0,
+        valuation_date=None
+    ):
         """
-        Initialize the barrier option with standard option inputs and barrier level.
-
-        Parameters:
-        - S0: Spot price of the underlying
-        - K: Strike price
-        - T: Time to maturity (years)
-        - r: Risk-free interest rate
-        - sigma: Volatility (annualized)
-        - B: Barrier level
-        - valuation_date: Valuation date (default: 16 May 2025 if None)
+        S0  : spot price
+        K   : strike
+        T   : maturity (yrs)
+        r   : risk-free CC rate
+        sigma: vol (annualised)
+        B   : barrier level (up-and-in)
+        q   : continuous dividend yield
         """
-        super().__init__(S0, K, T, r, sigma, valuation_date=valuation_date)
-        self.B = B  # Barrier level
+        super().__init__(S0, K, T, q, r, sigma, valuation_date=valuation_date)
+        self.B = B                     # barrier level
 
-    def _extra_args(self):
+    # ---------- pricing -----------------------------------------------------
+    def price(self,
+              M: int = DEFAULT_PATHS,
+              N: int = DEFAULT_STEPS,
+              seed: int = None,
+              show_diagnostics: bool = True) -> float:
         """
-        Pass barrier level to superclass for delta/vega finite difference calls.
+        Monte-Carlo estimator for an up-and-in barrier call.
         """
-        return [self.B]
+        # simulate GBM with dividend yield q (drift = (r-q))
+        S = simulate_paths(
+            self.S0, self.T, self.r, self.sigma,
+            q=self.q, M=M, N=N, seed=seed
+        )
 
-    def price(self, M=DEFAULT_PATHS, N=DEFAULT_STEPS, seed=None, show_diagnostics=True):
-        """
-        Estimate the option price using Monte Carlo simulation.
-
-        Parameters:
-        - M: Number of Monte Carlo paths
-        - N: Number of time steps per path
-        - seed: Optional random seed for reproducibility
-        - show_diagnostics: Whether to print probability stats (default True)
-
-        Returns:
-        - Discounted expected payoff of the barrier option
-        """
-        # Simulate price paths under GBM
-        S = simulate_paths(self.S0, self.T, self.r, self.sigma, M=M, N=N, seed=seed)
-
-        # Check if each path ever crosses the barrier
-        breached = np.any(S >= self.B, axis=0)
-
-        # Compute payoff only if barrier was breached
-        payoffs = np.where(breached, np.maximum(S[-1] - self.K, 0), 0)
+        breached = np.any(S >= self.B, axis=0)            # path hits barrier?
+        payoffs  = np.where(breached,
+                            np.maximum(S[-1] - self.K, 0.0),
+                            0.0)
 
         if show_diagnostics:
-            prob_breached = np.mean(breached)
-            prob_not_breached = 1 - prob_breached
-            prob_in_the_money = np.mean((S[-1] > self.K) & (np.max(S, axis=0) >= self.B))
-            prob_out_of_the_money = 1 - prob_in_the_money
+            print(f"🔍 P(barrier breached): {breached.mean():.4%}")
+            print(f"🔍 P(in-the-money @T) : {((S[-1] > self.K) & breached).mean():.4%}")
 
-            print(f"🔍 P(Barrier Breached):         {prob_breached:.4%}")
-            print(f"🔍 P(Barrier Not Breached):     {prob_not_breached:.4%}")
-            print(f"🔍 P(In-the-money at expiry):   {prob_in_the_money:.4%}")
-            print(f"🔍 P(Out-of-the-money at expiry): {prob_out_of_the_money:.4%}")
+        return np.exp(-self.r * self.T) * payoffs.mean()
 
-        return np.exp(-self.r * self.T) * np.mean(payoffs)
+    # ---------- Greeks (FD) --------------------------------------------------
+    def delta(self, eps: float = 0.50, **mc_kwargs) -> float:
+        up   = self.__class__(self.S0 + eps, self.K, self.T,
+                              self.r, self.sigma, self.B, self.q)
+        down = self.__class__(self.S0 - eps, self.K, self.T,
+                              self.r, self.sigma, self.B, self.q)
 
-    def delta(self, epsilon=0.5, M=DEFAULT_PATHS, N=DEFAULT_STEPS, seed=None):
-        """
-        Monte Carlo-based Delta for barrier options using central finite difference.
-        Includes control over number of paths and random seed for reproducibility.
-        """
-        up = self.__class__(self.S0 + epsilon, self.K, self.T, self.r, self.sigma, self.B)
-        down = self.__class__(self.S0 - epsilon, self.K, self.T, self.r, self.sigma, self.B)
-        return (up.price(M=M, N=N, seed=seed, show_diagnostics=False) - down.price(M=M, N=N, seed=seed,show_diagnostics=False)) / (2 * epsilon)
+        return (up.price(show_diagnostics=False, **mc_kwargs)
+                - down.price(show_diagnostics=False, **mc_kwargs)) / (2 * eps)
 
-    def vega(self, epsilon=0.01, M=DEFAULT_PATHS, N=DEFAULT_STEPS, seed=None):
-        """
-        Monte Carlo-based Vega for barrier options using central finite difference.
-        Measures sensitivity to volatility changes with consistent simulation parameters.
-        """
-        up = self.__class__(self.S0, self.K, self.T, self.r, self.sigma + epsilon, self.B)
-        down = self.__class__(self.S0, self.K, self.T, self.r, self.sigma - epsilon, self.B)
-        return (up.price(M=M, N=N, seed=seed, show_diagnostics=False) - down.price(M=M, N=N, seed=seed,show_diagnostics=False)) / (2 * epsilon)
+    def vega(self, eps: float = 0.01, **mc_kwargs) -> float:
+        up   = self.__class__(self.S0, self.K, self.T,
+                              self.r, self.sigma + eps, self.B, self.q)
+        down = self.__class__(self.S0, self.K, self.T,
+                              self.r, self.sigma - eps, self.B, self.q)
 
+        return (up.price(show_diagnostics=False, **mc_kwargs)
+                - down.price(show_diagnostics=False, **mc_kwargs)) / (2 * eps)
 
     def visualize_paths(self, M=200, N=252, seed=None):
         """

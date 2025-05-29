@@ -4,19 +4,13 @@ import numpy as np
 from datetime import datetime
 
 class DataFetcher:
-    def __init__(self, tickers, start_date, end_date, csv_path: str = None):
+    def __init__(self, tickers=None, start_date=None, end_date=None, csv_path: str = None):
         """
-        tickers: list of ticker symbols
-        start_date, end_date: str or datetime-like for date filtering
+        tickers: optional list of ticker symbols; if None, uses keys of implied_volatility
+        start_date, end_date: optional str or datetime-like for date filtering when fetching from yfinance
         csv_path: optional path to CSV containing closing prices (dates as index, tickers as columns)
         """
-        # Ensure dates are Timestamps
-        self.start_date = pd.to_datetime(start_date)
-        self.end_date = pd.to_datetime(end_date)
-        self.tickers = tickers
-        self.data = {}  # { ticker: pd.Series of Close prices }
-
-        # Pre-defined volatility and dividend data (optional)
+        # Pre-defined volatility and dividend data
         self.implied_volatility = {
             "BHP.AX": 0.2513,
             "CBA.AX": 0.19108,
@@ -34,6 +28,15 @@ class DataFetcher:
             "MQG.AX": 0.031,
         }
 
+        # Set tickers to provided list or default to implied_volatility keys
+        self.tickers = tickers if tickers is not None else list(self.implied_volatility.keys())
+        self.data = {}  # { ticker: pd.Series of Close prices }
+
+        # Optional date filters for yfinance fetch
+        self.start_date = pd.to_datetime(start_date) if start_date else None
+        self.end_date = pd.to_datetime(end_date) if end_date else None
+
+        # Load data from CSV or fetch via yfinance
         if csv_path:
             self.load_data_from_csv(csv_path)
         else:
@@ -42,12 +45,10 @@ class DataFetcher:
     def load_data_from_csv(self, csv_path: str):
         """
         Load historical closing prices from a CSV file.
-        The CSV should have dates as the index and tickers as columns.
+        Uses all timestamps in the CSV without date filtering.
         """
         df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
         df = df.sort_index()
-        # Filter by date range
-        df = df.loc[self.start_date : self.end_date]
         for t in self.tickers:
             if t not in df.columns:
                 raise KeyError(f"Ticker {t} not found in CSV columns")
@@ -58,8 +59,8 @@ class DataFetcher:
         for t in self.tickers:
             df = yf.download(
                 t,
-                start=self.start_date.strftime("%Y-%m-%d"),
-                end=(self.end_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                start=self.start_date.strftime("%Y-%m-%d") if self.start_date else None,
+                end=(self.end_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d") if self.end_date else None,
                 progress=False,
                 auto_adjust=True
             )
@@ -78,9 +79,7 @@ class DataFetcher:
         total_ret = end_price / start_price - 1.0
         days = (prices.index[-1] - prices.index[0]).days
         years = days / 365.25
-        if years <= 0:
-            return np.nan
-        return (1 + total_ret) ** (1 / years) - 1
+        return (1 + total_ret) ** (1 / years) - 1 if years > 0 else np.nan
 
     def get_stock_data(self, ticker) -> dict:
         """
@@ -91,15 +90,11 @@ class DataFetcher:
           - dividend_yield      (float)
         """
         prices = self.data[ticker]
-        # 1) annualized return
         ann_ret = self.get_returns(ticker)
-        # 2) historical vol (proxy for implied vol)
         log_rets = np.log(prices / prices.shift(1)).dropna()
         vol = float(log_rets.std() * np.sqrt(252))
         self.implied_volatility[ticker] = vol
-        # 3) spot price
         spot = float(prices.iloc[-1])
-        # 4) dividend yield (fallback to historical_div if no dividends in period)
         div_yield = self.historical_div.get(ticker, np.nan)
         return {
             "annual_return": ann_ret,
@@ -113,13 +108,10 @@ class DataFetcher:
         Builds the annualized covariance matrix of mean-centered daily pct-change returns
         for all tickers in self.tickers.
         """
-        # Build DataFrame of daily percent returns
         df_rets = pd.DataFrame({
             t: self.data[t].pct_change().dropna()
             for t in self.tickers
         })
-        # Mean-center returns
         df_centered = df_rets - df_rets.mean()
-        # Unbiased covariance and annualize
         cov_ann = df_centered.cov() * 252
         return cov_ann
