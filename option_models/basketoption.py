@@ -17,19 +17,19 @@ class BasketOption:
         seed: int = None
     ):
         """
-        Monte Carlo pricer for a European basket call option using DataFetcher.
+        Monte Carlo pricer for a European basket call option.
 
-        Parameters:
-         - basket_weights: dict of {ticker: weight}
-         - strike: strike price K
-         - expiry: option expiry date (datetime)
-         - valuation_date: pricing date (datetime)
-         - rate: annual risk-free rate r
-         - data_fetcher: instance of DataFetcher with .data loaded
-         - M: number of Monte Carlo paths
-         - N: number of time steps per path
-         - seed: random seed for reproducibility
+        :param basket_weights: dict of {ticker: weight}
+        :param strike: strike price K
+        :param expiry: option expiry date
+        :param valuation_date: pricing date
+        :param rate: annual risk-free rate r
+        :param data_fetcher: Dataloader instance providing get_stock_data and get_covariance_matrix
+        :param M: number of Monte Carlo paths
+        :param N: number of time steps per path
+        :param seed: random seed for reproducibility
         """
+        # store inputs
         self.weights = pd.Series(basket_weights)
         self.K = strike
         self.expiry = pd.to_datetime(expiry)
@@ -40,39 +40,54 @@ class BasketOption:
         self.seed = seed
         self.fetcher = data_fetcher
 
-        # Fetch market data via DataFetcher
-        # Ensure data_fetcher already loaded prices in its .data dict
-        cov_ann = self.fetcher.get_covariance_matrix()
-        # Annualized covariance matrix of returns
-        self.cov_matrix = cov_ann
+        # time to expiry in years
+        delta = self.expiry - self.valuation_date
+        self.T = delta.days / 365.0
 
-        # Spot prices and dividend yields per ticker
         spots = {}
-        div_yields = {}
+        divs = {}
+        vols = {}
+        avg_rets = {}
         for t in self.weights.index:
             sd = self.fetcher.get_stock_data(t)
-            spots[t] = sd['spot']
-            div_yields[t] = sd['dividend_yield']
-        self.spot_prices = pd.Series(spots)
-        self.div_yield = pd.Series(div_yields)
+            # extract numeric values by key
+            spot    = sd["spot"]
+            div     = sd["dividend_yield"]
+            vol     = sd["implied_volatility"]
+            avg_ret = sd["annual_return"]
+            spots[t]    = spot
+            divs[t]     = div
+            vols[t]     = vol
+            avg_rets[t] = avg_ret
 
-        # Basket spot and volatility
-        self.S0 = (self.weights * self.spot_prices).sum()
+        self.spot_prices = pd.Series(spots, dtype=float)
+        self.div_yield   = pd.Series(divs, dtype=float)
+        self.vols        = pd.Series(vols, dtype=float)
+        self.avg_returns = pd.Series(avg_rets, dtype=float)
+
+        tickers = self.weights.index.tolist()
+        self.cov_matrix = self.fetcher.get_covariance_matrix(tickers)
+
         w = self.weights.values
-        cov = self.cov_matrix.loc[self.weights.index, self.weights.index].values
-        self.sigma = np.sqrt(w @ cov @ w)
+        s = self.spot_prices.values
+        self.S0 = np.dot(w, s)
 
-        # Time to expiry
-        delta = self.expiry - self.valuation_date
-        self.T = delta.days / 365
+        cov_vals = self.cov_matrix.values
+        self.sigma = np.sqrt(np.dot(w, cov_vals.dot(w)))
+        ar = self.avg_returns.values
+        self.mu = np.dot(w, ar)
+        self.drift_rate = self.r
+
+    def get_return(self):
+        return self.mu
 
     def _simulate_basket(self, M_sim: int = None):
-        """Simulate basket price paths under risk-neutral drift r and no dividends."""
+        """Simulate basket paths under current drift_rate and volatility."""
         M_sim = M_sim or self.M
         if self.seed is not None:
             np.random.seed(self.seed)
         dt = self.T / self.N
-        drift = (self.r - 0.5 * self.sigma**2) * dt
+        drift = (self.drift_rate - 0.5 * self.sigma**2) * dt
         vol_step = self.sigma * np.sqrt(dt)
 
         S = np.empty((self.N + 1, M_sim))
@@ -83,7 +98,7 @@ class BasketOption:
         return S
 
     def price(self, M_sim: int = None) -> float:
-        """Compute Monte Carlo price of the European basket call."""
+        """Monte Carlo price of the European basket call."""
         S = self._simulate_basket(M_sim)
         payoffs = np.maximum(S[-1] - self.K, 0)
         return np.exp(-self.r * self.T) * payoffs.mean()
@@ -142,3 +157,23 @@ class BasketOption:
         plt.ylabel('Basket Value')
         plt.grid(True)
         plt.show()
+
+    def price_risk_free(self, M_sim: int = None) -> float:
+        """Price using risk-free drift."""
+        self.drift_rate = self.r
+        return self.price(M_sim)
+
+    def price_historical(self, M_sim: int = None) -> float:
+        """Price using historical basket return as drift."""
+        self.drift_rate = self.mu
+        return self.price(M_sim)
+
+    def plot_diffusion_risk_free(self, M_plot: int = 200):
+        """Plot diffusion with risk-free drift."""
+        self.drift_rate = self.r
+        self.plot_paths(M_plot)
+
+    def plot_diffusion_historical(self, M_plot: int = 200):
+        """Plot diffusion with historical return drift."""
+        self.drift_rate = self.mu
+        self.plot_paths(M_plot)

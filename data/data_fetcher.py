@@ -103,15 +103,24 @@ class DataFetcher:
             "dividend_yield": div_yield
         }
 
-    def get_covariance_matrix(self) -> pd.DataFrame:
+    def get_covariance_matrix(self, tickers: list = None) -> pd.DataFrame:
         """
         Builds the annualized covariance matrix of mean-centered daily pct-change returns
-        for all tickers in self.tickers.
+        for the specified tickers.
+        
+        :param tickers: list of ticker strings to include; defaults to self.tickers
+        :return: DataFrame of annualized covariances
         """
+        # default to all
+        tickers = tickers or self.tickers
+
+        # build daily-return DataFrame only for the requested tickers
         df_rets = pd.DataFrame({
             t: self.data[t].pct_change().dropna()
-            for t in self.tickers
+            for t in tickers
         })
+
+        # mean-center and annualize
         df_centered = df_rets - df_rets.mean()
         cov_ann = df_centered.cov() * 252
         return cov_ann
