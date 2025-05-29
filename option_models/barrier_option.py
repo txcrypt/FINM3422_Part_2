@@ -52,7 +52,7 @@ class BarrierOption(Option):
         # simulate GBM with dividend yield q (drift = (r-q))
         S = simulate_paths(
             self.S0, self.T, self.r, self.sigma,
-            q=self.q, M=M, N=N, seed=seed
+            M=M, N=N, seed=seed
         )
 
         breached = np.any(S >= self.B, axis=0)            # path hits barrier?
